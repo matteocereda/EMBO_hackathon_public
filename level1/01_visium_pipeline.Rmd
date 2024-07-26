@@ -1,0 +1,744 @@
+---
+output: 
+  html_document:
+    code_folding: hide
+    toc: true
+    toc_float: true
+    toc_depth: 2
+---
+
+# Introduction
+
+We will analyze Visium 10x data from a tissue slide of High-grade serous ovarian carcinoma (HGSOC).
+
+---\> @team put the description of the slide/tumor that we are analysing
+
+The tumour sample was collected during interval debulking surgery from HGSOC patient with a good response to taxane- and platinum-based neoadjuvant chemotherapy (NACT) treatment.
+
+```{=html}
+  <hr>
+```
+# Warming up: setting the environment that you need
+
+Before starting, let's set the stage to be all on the same ground.
+
+You have been provided with configuration files. Please select "your" environment and the "helper" functions
+
+---\> @team here they simply have to understand amongst all files we provided what they may need.
+
+```{r, setting_envir, message=TRUE, include=FALSE}
+source('../00_environment.R')
+source("../00_helper_functions.R")
+```
+
+```{=html}
+  <hr>
+```
+# Loading the package you need
+
+```{r, library_loading, message=FALSE}
+require(ggplot2)
+require(ggsci)
+require(plyr)
+require(dplyr)
+require(patchwork)
+require(Seurat)
+```
+
+```{=html}
+  <hr>
+```
+# Loading Visium 10x data of HGSOC slide
+
+We start loading the expression data
+
+Files provided by 10x are:
+
+-   **the matrix.mtx:**\
+    This is a sparse matrix for a more efficient manipulation.\
+    Rows: genes\
+    Columns: barcodes associated to each spot.\
+
+-   **features.tsv:**\
+    This file contains row indices of the matrix file. Every feature has an ID and a name stored in the first and second columns, respectively. The third column specify the type of feature , which will be one of the following options depending on the feature type:
+
+    -   Gene Expression (this case)
+    -   Antibody Capture
+    -   CRISPR Guide Capture
+    -   Multiplexing Capture
+    -   CUSTOM\
+
+    In this analysis, features correspond to Gene Expression data: the ID correspond to gene_id and the name to the gene_name.
+
+-   **barcodes.tsv:**\
+    Barcode sequences correspond to column indices of the matrix file. Each barcode sequence contains a suffix with a dash separator followed by a number, such as '-1'
+
+```{=html}
+  <hr>
+```
+Let's import the raw counts and the HE image of the slide.
+
+| What       | Path to                                                 |
+|------------|---------------------------------------------------------|
+| raw counts | ../input/GSM6506114_SP5/                                |
+| HE image   | ../input/GSM6506114_SP5/spatial/tissue_lowres_image.png |
+
+Tip: use the Seurat object Seurat that contains both the spot-level expression data along with the associated image of the tissue slice. A `Seurat` object is a specialized data structure used in the Seurat package, which is designed for the analysis and visualization of scRNA-seq data. The Seurat object is a container that organizes and stores all the data associated with a single-cell experiment and allows for efficient data management and streamlined analysis workflows. In the context of ST analysis, the Seurat object can be extended to handle spatial information, enabling the study of gene expression in the context of tissue architecture.
+
+--\> @team here they should find the way to import data
+
+```{=html}
+  <hr>
+```
+--\> @team here is the solution
+
+By using `Read10X()` function, we load the sparse data matrix of gene expression. We specify the directory containing the file.\
+`gene.column` refers to the column number in the feature.tsv file where the gene names are stored.\
+`cell.column` indicates the column number where the cell names are specified in the barcodes.tsv file.\
+`unique.features` is a logical parameter to specify whether to make gene names unique and avoid redundant names.\
+`strip.suffix` is a logical parameter (default FALSE) to remove the suffix '-1' from all spot barcodes
+
+```{r loading_counts, message=TRUE, warning=F}
+counts <- Read10X(data.dir = "../input/GSM6506114_SP5/"
+                  , gene.column = 2
+                  , cell.column = 1
+                  , unique.features = TRUE
+                  , strip.suffix = FALSE) # KEPT to match spot in the img (the reading function does not trim the "-1")
+str(counts)
+```
+
+As we can see the `counts` table is an object of class `dgTMatrix`, which is a sparse matrix. This format is used since spatial transcriptomics (ST) data contains many zeros, so sparse matrices are employed to keep the counts table as light as possible.
+
+Now we create a Seurat object from raw counts data.
+
+`counts` parameter takes the matrix-like object with raw counts.\
+In `project` we explicit the project name for the Seurat object.\
+in `assay` we specify the name of initial assay.
+
+The `sp` object contains:\
+- `orig.ident`: the identifier of the sample.\
+- `nCount_spatial`: the total number of counts per cell/spot\
+- `nFeature_spatial`: the number of detected features (genes) per cell/spot
+
+```{r getting_seurat_obj, message=FALSE, warning=FALSE}
+sp <- CreateSeuratObject(counts = counts 
+                         , project = 'GSM6506114_SP5'
+                         , assay = 'Visium10x_008um'
+                         )
+                         
+DefaultAssay(sp) <- 'Visium10x_008um' #The default assay is set to `Visium10x_008um`
+
+
+```
+
+Let's include the low-resultion tissue image, which are outputs of Space Ranger, in the Seurat obj
+
+```{=html}
+<style>
+.bg-light {
+  background-color: #f8f9fa !important;
+  margin: 0px;
+  padding: 0px;
+}
+</style>
+
+<div class="bg-light">
+  <p>
+    <!-- PLEASE CHANGE THE PATH TO THE PIPELINE REPO HERE AND ABOVE -->
+    <img src="../input/GSM6506114_SP5/spatial/tissue_hires_image.png" style="float: left; margin-right: 25px; height: 100px;"/>
+  </p>
+  <hr>
+</div>
+```
+```{=html}
+  <hr>
+```
+Now we retrieve the image metadata from 10X Visium experiment and create an `img` object.\
+Load in the 10X Genomics Visium Image (ref: <https://github.com/satijalab/seurat/issues/5806>) in the img object to extrapolate the spatial 2D coordinates of each spot.
+
+`image.name` is the file name of the PNG we are loading in\
+`assay` specify the associated assay in the Seurat object we are building\
+`slice` is the name for the current image\
+`filter.matrix` is a boolean option to retain only spots in the count matrix that have been detected to be over the tissue image.
+
+```{r getting_image, message=FALSE, warning=FALSE}
+img <- Read10X_Image(image.dir = "../input/GSM6506114_SP5/spatial/"
+                     , image.name = "tissue_lowres_image.png"
+                     , assay = 'Visium10x_008um'
+                     , slice = 'slice1'
+                     , filter.matrix = TRUE
+                     )
+# Getting the cell (spots) names
+
+sp_cells = Cells(sp)
+
+# Retrieve spots associated to features in the SeuratObject `sp` from the image object `img`
+
+img <- img[sp_cells]
+
+# Add the image to the Defaulf object `sp`
+
+sp[["slice"]] <- img
+
+```
+
+```{=html}
+  <hr>
+```
+# Test your dataset
+
+Let's interrogate your data. Please provide a quantitative assessment of the performance of this ST assay
+
+--\> @team here they should find QC stastics to describe the data
+
+Tip: if you are familiar with single-cell data, you can exploit some statics that are conventionally used in this field.
+
+```{=html}
+  <hr>
+```
+--\> @team here the solution. WE MAY HAVE FEW MORE QCs
+
+Let's :
+
+-   assess the percentage of MT genes;
+
+-   the capture efficiency;
+
+-   test the dependencies of the stats;
+
+-   visualize the results.
+
+```{r QCs, warning = FALSE}
+mt_percentage = PercentageFeatureSet(sp, pattern =  "^MT-")
+
+# Adding the mt_percentage as metadata to the Seurat object
+sp = AddMetaData(object = sp, metadata =  mt_percentage, col.name = "percent.mt")
+
+
+sp@meta.data$transcriptome_capture_efficiency = with(sp@meta.data, nFeature_Visium10x_008um/nCount_Visium10x_008um)
+
+selected_features = c("nFeature_Visium10x_008um","nCount_Visium10x_008um", "percent.mt"
+                      , "transcriptome_capture_efficiency" )
+
+# `pairs` creates a matrix of scatter plots for visualizing relationships between the selected features
+
+pairs(sp@meta.data[,selected_features]
+      , lower.panel = panel.smooth
+      , upper.panel = panel.cor) 
+
+```
+
+`VlnPlot` creates violin plots that allow to visualize the distribution of the selected features
+
+```{r QCs2, fig.height=6, fig.width= 8}
+VlnPlot(sp, layer = 'counts', features = selected_features, pt.size = 0.1, ncol = 2) 
+```
+
+The plot presented above visualizes the distribution of the selected features across all spots.
+
+-   `nFeature_Visium10x_008um` illustrates the distribution of the number of unique genes detected per spot.\
+-   `nCount_Visium10x_008um` shows the distribution of total UMI counts per spot.\
+-   `percent.mt` shows the percentage of reads mapping to mitochondrial genes per spot.\
+-   `transcriptome_capture_efficiency` represents the transcriptome capture efficiency across spots.
+
+Let's see the statistics on the tissue slide
+
+```{r QCs3, fig.width= 16}
+HE_slide = SpatialDimPlot(sp, pt.size.factor = 0.5)
+FS_slide = SpatialFeaturePlot(sp, features = selected_features, combine = T, ncol = 4 ) 
+# Combine the plots
+patchwork::wrap_plots(HE_slide, FS_slide, ncol = 1)
+```
+
+```{=html}
+  <hr>
+```
+# Identification of cluster of spots
+
+Let's define cluster of spot that share similar trascriptomic profiles. Provide a visualization of clusters on the slide.
+
+---\> @team We can ask for an assessment of clustering robustness
+
+Tip: select the proper count normalization before detecting the clusters
+
+```{=html}
+  <hr>
+```
+---\> \@ team Here's the solution
+
+We perform standard log-normalization and exploit the `findCluster` function of Seurat
+
+```{r getting_clusters, message=FALSE, include = FALSE}
+require(glmGamPoi)
+sp <- NormalizeData(sp, assay = "Visium10x_008um", normalization.method = "LogNormalize")
+```
+
+We need to identify highly variable features in the dataset as implemented in `FindVariableFeatures` function. Then, we exploit `ScaleData` function to scale and center the data for downstream analyses
+
+```{r finding_variable_spots, message=FALSE, include = FALSE}
+sp <- FindVariableFeatures(sp,selection.method = "vst")
+sp <- ScaleData(sp)
+```
+
+We use `FindNeighbors` function to compute the nearest neighbours for clustering, it finds the nearest neighbors of each cell based on the first 30 PCs
+
+```{r finding_neighbors, include = FALSE}
+sp <- RunPCA(sp, assay = "Visium10x_008um", reduction.name = "pca")
+sp <- FindNeighbors(sp, assay = "Visium10x_008um", reduction = "pca", dims = 1:30)
+```
+
+Finally, `FindClusters` identifies clusters in the data
+
+```{r finding_clusters, include = FALSE}
+sp <- FindClusters(sp, cluster.name = "seurat_cluster", resolution = 3)
+```
+
+The identified clusters are visualized over the spatial image, this helps to see the spatial distribution of different gene expression patterns
+
+```{r show_cluster, fig.width=10}
+Idents(sp) <- "seurat_clusters" 
+#retrieves and sort cells by their cluster identities, storing the result in the `cells` variable  
+cells <- CellsByIdentities(sp, idents = sort(as.numeric(unique(sp@meta.data$seurat_clusters)))) 
+str(cells)
+
+p <- SpatialDimPlot(sp,
+                    cells.highlight = cells[setdiff(names(cells), "NA")],
+                    cols.highlight = c("#FFFF00", "grey50"), facet.highlight = T, combine = T) + NoLegend()
+p
+```
+
+```{r print_clusters, fig.width=15, fig.height=10, message = FALSE}
+cluster_slide = SpatialDimPlot(sp, label = T, repel = T, label.size = 4)
+
+patchwork::wrap_plots(HE_slide, cluster_slide, ncol=1)
+```
+
+# Getting the gene signatures
+
+Get the markers of your clusters and visualize the XXX top-ranked ones for each cluster.
+
+Tip: XXXX top 50, logFC\>1, FDR\<0.1
+
+```{=html}
+  <hr>
+```
+---\> \@ team Here's the solution
+
+Use the function \`FindAllMarkers' to get the list of genes that represent each cluster.
+
+```{r getting_markers, include=FALSE}
+require(presto) # this package speed up the computational time
+DefaultAssay(sp) <- "Visium10x_008um"
+
+markers <- FindAllMarkers(sp, assay = "Visium10x_008um", only.pos = TRUE)
+
+#adds a rank column to the markers datafame, ranking them by adjusted p-value
+markers <- ddply(markers, .(cluster), mutate, rank = rank(p_val_adj)) 
+
+#filter markers to select the ones with a log2fold change ≥ 1 and adjusted p-value ≤ 0.1
+markers %>%
+  group_by(cluster) %>%
+  dplyr::filter(avg_log2FC >= 1 & p_val_adj <= 0.1) -> selected_markers 
+
+# Selects the top 50 genes for each cluster
+selected_markers %>% slice_head(n = 50) %>% ungroup() -> top50
+```
+
+```{r selected markers}
+DT::datatable(selected_markers,rownames = F,style = "auto", class = 'cell-border stripe')
+```
+
+`ScaleData` Scales and centers the data for the selected features (e.g top50\$gene)
+
+```{r, include = FALSE}
+sp_subset <- ScaleData(sp, assay = "Visium10x_008um", features = top50$gene)
+```
+
+`features` specifies the features (genes) to be included in the heatmap
+
+```{r figure5, fig.width=17, fig.height=12 }
+p <- DoHeatmap(sp_subset, assay = "Visium10x_008um", features = top50$gene, size = 2.5) + 
+  theme(axis.text = element_text(size = 5.5)) + NoLegend()
+p
+
+```
+
+# Functional analysis on markers
+
+Let's identify cancerous and not cancerous cells by annotating markers on hallmarks of cancer and NCG cancer/healthy drivers.\
+How many superclass of cell can we spot in the lesion? What are they?
+
+To do so we will exploit:
+
+-   the involvement of genes in the Hallmarks of Cancer
+
+-   the selective advantage of being cancer and healty drivers genes
+
+Tip: --\> @team PLEASE REPORT HERE INFORMATION OF NCG AND HALLMARKS
+
+[NCG](http://network-cancer-genes.org/) is a manually curated collection of cancer genes and healthy drivers.
+
+Hallmark gene sets is collected in the [Human Molecular Signatures Database (MSigDB)](https://www.gsea-msigdb.org/gsea/msigdb/collections.jsp)
+
+--\> @team we ask to characterize cluster based on enrichments of hallmarks and cancer/healthy genes. It is nice to see how enrichments can define the cell composition of clusters
+
+```{=html}
+  <hr>
+```
+---\> \@ team Here's the solution
+
+Fetching Hallmark gene sets
+
+```{r hallmarks, message=FALSE, include = FALSE}
+
+require(msigdbr)
+require(clusterProfiler)
+require(tidyverse)
+
+h_gene_sets = msigdbr(species = "human", category = "H")
+```
+
+`enricher` performs enrichment analysis the genes of each cluster
+
+```{r enricher, include=FALSE}
+res = vector("list", length(unique(markers$cluster)))
+
+for(i in unique(markers$cluster)){
+  print(i)
+  genes = unique(subset(markers, cluster==i)$gene)
+  genes = genes[!is.na(genes)]
+  y = enricher(genes
+               , TERM2GENE = h_gene_sets[,c('gs_name','gene_symbol')]
+               , pAdjustMethod = "BH"
+               , pvalueCutoff=1
+               , qvalueCutoff=1 )
+  y = y@result
+  y$cluster = i
+  res[[i]] = y 
+}
+
+enr = bind_rows(res) %>% subset(p.adjust<=0.1)
+```
+
+```{r}
+DT::datatable(enr,rownames = F,style = "auto", class = 'cell-border stripe')
+```
+
+Visualization of Enrichment results
+
+```{r enr_hall, fig.height=9, fig.width=13 }
+ggplot(enr,aes(x = -log10(p.adjust),y = fct_reorder(Description, p.adjust, .desc = T), color=cluster, shape=cluster)) + 
+  geom_point(size=2)+scale_shape_manual(values=0:18)+scale_x_sqrt()+theme_bw()
+ 
+```
+
+Loading NCG data
+
+```{r NCG}
+cgc      = subset(read.delim2('../input/NCG_cancerdrivers_annotation_supporting_evidence.tsv')
+              , primary_site %in% c('ovary'))
+healthy  = subset(read.delim2('../input/NCG_healthydrivers_annotation_supporting_evidence.tsv'),
+                  organ_system=='Gynecologic')
+
+message("The dimensions of the cancer genes dataframe are: ", paste(dim(cgc), collapse = " x "))
+message("The dimensions of the healthy genes dataframe are: ", paste(dim(healthy), collapse = " x "))
+```
+
+`markers$driver_cancer_clone` and `markers$driver_not_cancer_clone`: Flags markers as either cancer drivers or not.
+
+```{r}
+markers$driver_cancer_clone     = markers$gene%in%cgc$symbol
+markers$driver_not_cancer_clone = markers$gene%in%healthy$symbol
+```
+
+`overview`: Summarizes the number of markers and the count of cancer and non-cancer drivers per cluster.
+
+```{r}
+overview = ddply(markers, .(cluster), summarise
+      , markers = n()
+      , driver_cancer_clone = sum(driver_cancer_clone)
+      , driver_not_cancer_clone = sum(driver_not_cancer_clone)
+) %>% arrange(as.numeric(as.character(cluster)))
+
+DT::datatable(overview,rownames = F,style = "auto", class = 'cell-border stripe')
+```
+
+Adding metadata to Seurat object to visualize cancer driver information
+
+```{r}
+cancer = overview$driver_cancer_clone[match(Idents(sp), overview$cluster)]
+names(cancer) <- colnames(sp)
+not_cancer = overview$driver_not_cancer_clone[match(Idents(sp), overview$cluster)]
+names(not_cancer) <- colnames(sp)
+
+sp <- AddMetaData(object = sp, metadata = cancer, col.name = 'driver_cancer_clone')
+sp <- AddMetaData(object = sp, metadata = not_cancer, col.name = 'driver_not_cancer_clone')
+```
+
+Visualizing how cancer and non-cancer driver genes are distributed
+
+```{r cgc slide}
+cgc_slide = SpatialFeaturePlot(sp, features = c('driver_cancer_clone', 'driver_not_cancer_clone')
+                               , combine = T, ncol = 2
+                               , keep.scale = 'all' )
+cgc_slide
+```
+
+# Prediction cellular types by unsupervised and supervised approaches
+
+Let's see whethere we can strengthen the results by inferring cell composition Cell type prediction can be done using:
+
+\- an unsupervised approach: CLUSTERMOLE
+
+\- a scRNA-guided apporach: RCTD ---\> @team this may be removed for sake of time and to avoid the use of another dataset
+
+```{=html}
+  <hr>
+```
+---\> \@ team Here's the solution
+
+Loading the required packages
+
+`clustermole` predicts cell types based on marker enrichment
+
+```{r message=FALSE, include = FALSE}
+require(spacexr) # RCTD
+require(clustermole) # cell type prediction
+
+DefaultAssay(sp) <- "Visium10x_008um"
+
+#Preparing markers 
+all_mrks = dlply(markers, ~cluster)
+mrks = dlply(subset(markers, rank<=50), ~cluster) #splits the markers dataframe by cluster, creating a list of markers for each cluster 
+```
+
+`GetAssayData` retrieves assay data from the Seurat object `clustermole_enrichment` performs cell type enrichment analysis using the CLUSTERMOLE method
+
+```{r clustermole, include=FALSE}
+log_norm_counts = GetAssayData(object = sp, layer = 'data') %>% as.matrix()
+l <- clustermole_enrichment(log_norm_counts, species = "hs", method = 'ssgsea')
+```
+
+***--\>*** @team this is the most relevant step in the analysis, we should drive them towards the selection of this dataset.
+
+Extracting and cleaning ell type information
+
+```{r, warning=FALSE}
+db_mrks=clustermole_markers('hs') #retrieves marker data specific to human cells 
+cmh = ddply(subset(db_mrks, grepl('Human', celltype_full) & grepl('CellMarker',celltype_full)), .(db), summarise
+            , celltype_full=unique(celltype_full), db=unique(db))
+
+cmh$n_info = sapply(strsplit(cmh$celltype_full, "\\|"), length)
+cmh$celltype = sapply(strsplit(cmh$celltype_full,"\\|"), '[[',1)
+cmh$organ = sapply(strsplit(cmh$celltype_full,"\\|"), '[[',2)
+selected_cell_types = subset(cmh, (n_info==3 & !grepl("\\(|Embr|Neur|Glia|glia|Purkinje|Pyrami|Germ|germ|Follic|neuro|Adventitial", celltype_full)) | 
+                               organ== " Ovary ")$celltype_full
+rm(cmh, db_mrks)
+```
+
+Filters and cleans the enrichment results and adds the inferred cell type metadata back to the Seurat object
+
+```{r}
+enr_res = subset(l, celltype_full %in% selected_cell_types) #includes only the cell types 
+enr_res$celltype_full  = gsub(" | Human | CellMarker", "", enr_res$celltype_full)
+enr_res$celltype_full  = gsub( "\\||", "", enr_res$celltype_full)
+
+celltype = enr_res$celltype_full[match(Cells(sp), enr_res$cluster)]
+names(celltype) <- colnames(sp)
+sp <- AddMetaData(object = sp, metadata = celltype, col.name = 'celltype_full') #Adds the predicted cell types as metadata to the Seurat object
+
+```
+
+Summarizing enrichment results Identifies the most enriched cell type per cluster
+
+```{r}
+enr_res = ddply(enr_res,.(cluster), summarise, celltype_full=celltype_full[which(score_rank==min(score_rank))])
+
+spots = CellsByIdentities(sp, idents = sort(as.numeric(unique(sp@meta.data$seurat_clusters))))
+spots = mapply(function(x,y){data.frame(cluster=x, cluster_slide = y)}, x=spots, y=names(spots), SIMPLIFY = F)
+spots = bind_rows(spots)
+
+```
+
+Merges and summarizes the enrichement results with cell spots, calculating the percentage of spots per cluster
+
+```{r}
+enr_res = left_join(enr_res, spots, by = "cluster")
+enr_res = ddply(enr_res, .(cluster_slide, celltype_full), summarise, n_spots = n() ) 
+enr_res = ddply(enr_res, .(cluster_slide), mutate, total_spots = sum(n_spots))
+enr_res$perc_spot_per_cluster= enr_res$n_spot/enr_res$total_spot
+
+```
+
+Visualizing cell type composition
+
+```{r}
+ggplot(enr_res, aes(cluster_slide, perc_spot_per_cluster, fill=celltype_full))+
+  geom_bar(stat='identity', position = position_stack(), color='white')+
+  ggsci::scale_fill_igv()
+  
+```
+
+RCTD: scRNAseq-guided
+
+Loading counts matrix `GetAssayData` Retrieves raw counts data from the Seurat object
+
+```{r}
+DefaultAssay(sp) <- "Visium10x_008um"
+counts = GetAssayData(object = sp, assay = 'Visium10x_008um',layer = 'counts' )
+```
+
+Preparing cell type metadata and reference object for RCTD
+
+`Reference` Creates a reference object for RCTD with cell type annotations `GetTissueCoordinates` Retrieves spatial coordinates for tissue sections
+
+```{r , include=FALSE, warning=FALSE}
+celltype = sp@meta.data$celltype_full
+names(celltype) = Cells(sp)
+
+reference <- Reference(counts, factor(celltype), colSums(counts),nUMI = )
+coords = GetTissueCoordinates(object = sp)
+
+#create the RCTD query object
+query <- SpatialRNA(coords[,1:2], counts, colSums(counts))
+```
+
+Running RCTD
+
+`create.RCTD` and `run.RCTD` Runs the RCTD algorithm to predict cell types and add the results to the Seurat object
+
+```{r, include = FALSE}
+RCTD <- create.RCTD(query, reference, max_cores = 12, CELL_MIN_INSTANCE = 2)
+RCTD <- run.RCTD(RCTD, doublet_mode = "doublet")
+```
+
+Add results back to Seurat object
+
+```{r}
+sp <- AddMetaData(sp, metadata = RCTD@results$results_df)
+```
+
+Visualizing RCTD results
+
+```{r}
+unique_cell_type = unique(celltype)
+my_cols = ggsci::pal_rickandmorty()(11)
+names(my_cols) = unique_cell_type
+x=rep(1,11);names(x)=names(my_cols)
+pie(x, col = my_cols)
+```
+
+Plots for the firsts and second predicted cell types
+
+```{r setup7, include=FALSE}
+p1=SpatialDimPlot(sp, group.by = "first_type",pt.size.factor = 3, cols =my_cols)
+p2=SpatialDimPlot(sp, group.by = "second_type",pt.size.factor = 3, cols =my_cols)
+
+patchwork::wrap_plots(p1,p2, ncol = 1 )
+```
+
+# Identification of Ligand receptors
+
+Let's identify possible cell-to-cell communications via their ligands and receptors
+
+Tip: XXX
+
+```{=html}
+  <hr>
+```
+---\> \@ team Here's the solution
+
+```{r liana, echo=TRUE}
+require(tidyverse)
+require(magrittr)
+require(iTALK)
+require(CellChat)
+require(liana)
+require(dplyr)
+
+sp <- SetIdent(sp, value = "seurat_clusters")
+sp@meta.data$clusters = as.numeric(as.character(sp@meta.data$seurat_clusters))+1
+
+```
+
+Running LIANA. `liana_wrap` performs the ligand-receptor interactions analysis using multiple methods
+
+```{r echo=TRUE, message=FALSE, warning=FALSE}
+liana = liana_wrap(sp,
+                   method = c( "natmi" # Network Analysis Toolkit for the Multicellular Interactions Built on connectomeDB2020 
+                               # of 2,293 human ligand-receptor interactions with primary literature support (in the current manuscript) 
+                               # and additional 1,778 putative pairs (available as a part of NATMI only), which builds on our previous draft 
+                               # and a database of human cell interactions (Ramilowski, J. A., et al. Nat Commun 6, 7866 (2015)). 
+                               # Edges between any pair of cell types are then predicted based on the expression of the ligand in one cell type 
+                               # and the expression of its cognate receptor in the other cell type. NATMI introduces the concept of 
+                               # cell-connectivity-summary networks that merge the many ligand–receptor edges drawn from one cell type to 
+                               # another into a combined weighted cell-connectivity-summary edge to summarise how strongly (or specifically) 
+                               # each cell type is communicating to another cell type 
+                               # , "connectome"
+                              , "call_italk" # capture highly abundant ligand-receptor gene (or transcript) pairs, identify gains or losses 
+                               # of cellular interactions by comparative analysis, and track the dynamic changes of intercellular communication 
+                               # signals in longitudinal samples.
+                              , "call_cellchat" # quantitatively characterize and compare the inferred cell-cell communication networks using 
+                               # a systems approach by combining social network analysis, pattern recognition, and manifold learning approache
+                              # , "logfc"
+                              , "sca" # SingleCellSignalR facilitates the transformation of complex data into higher-order information
+                              # SingleCellSignalR regularized score achieves better control of the FP compared to other solutions
+                              # , "cellphonedb"
+                              ),
+                   resource = c("OmniPath"), # Use 'all' to run all 'human' resources in one go
+                   idents_col = 'celltype_full',
+                   # idents_col = 'clusters',
+                   min_cells = 5,
+                   return_all = FALSE,
+                   supp_columns = c("ligand.expr", "receptor.expr",  "ligand.pval", "receptor.pval", "ligand.FDR", "receptor.FDR"),
+                   verbose = TRUE,
+                   assay = "Visium10x_008um",
+                   .simplify = TRUE,
+                   cell.adj = NULL, # DOBBIAMO CALCOLARE QUESTA MATRICE  
+                   # base = NULL
+                   # parallelize = T,
+                   # workers = 10,
+                   # seed=30580,
+                   # assay.type = 'logcounts'
+                   )
+
+```
+
+Liana returns a list of results, each element of which corresponds to a method
+
+```{r echo=TRUE}
+liana.summary = liana %>% dplyr::glimpse()
+liana.summary <- liana.summary %>% liana_aggregate()
+liana.summary=ddply(liana.summary, .(source,target), mutate, ranking = rank(aggregate_rank))
+
+```
+
+Visualize the different components of liana
+
+We can aggregate these results into a tibble with consensus ranks
+
+```{r heatmap_lr}
+# liana.summary = readRDS("liana_summary.rds")
+
+heat_freq(liana.summary)
+```
+
+```{r chord_freq_lr}
+chord_freq(liana.summary,
+                source_groups = c("Epithelialcell(OvarianCancer)Ovary"))
+```
+
+--\> @team here the most recurrent receptor is DDR1 (@Francesca did it remind you anything?)
+
+```{r top_lr}
+top.ranked = subset(liana.summary, ranking<=5)
+
+lr  = subset(top.ranked, source%in%c("Macrophage", "M1macrophage", "M2macrophage","ExhaustedTcell") & target=="Epithelialcell(OvarianCancer)Ovary")
+DT::datatable(lr,rownames = F,style = "auto", class = 'cell-border stripe')
+```
+
+--\> @team PLEASE PLOT THE EXPRESSION OF DDR1 ON THE SLIDE
+
+```{r DDR1}
+SpatialFeaturePlot(sp, features = "DDR1" ) + ggtitle("DDR1 expression")
+```
