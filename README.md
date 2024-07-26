@@ -35,7 +35,6 @@ The group that solved all the levels in the smallest amount of time win the game
 | --- | --- |
 |`input` folder| Stores input files |
 |`level1` folder| Stores RMarkdown file to run level 01 |
-|`00_environment.R` | Set the env variables needed to run the code |
 |`00_dependencies.R` | Configure the libraries needed to run the code |
 |`00_helper_functions.R` | Some helper functions needed to run the code |
 
